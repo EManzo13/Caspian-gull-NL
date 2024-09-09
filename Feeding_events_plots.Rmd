@@ -1,0 +1,147 @@
+---
+title: "Feeding_events_plots"
+author: "Emilie Manzo"
+date: "2024-09-03"
+output: html_document
+---
+
+```{r load packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(dplyr)
+library(ggpubr)
+library(terra)
+library(gridExtra)
+library(ggspatial)
+library(ggmap)
+library(grid)
+```
+
+# Plot for singular events: trajectory, speed, temperature and altitude
+Plotting function allowing for visualisation of the animal's route and behaviour while foraging (used during data observation). To be applied to a dataset of all GPS points within a feeding event, for which the temperature and the altitude are measured as well. An API google key must be obtained to have a background map in the track plot.
+
+```{r Single plots, message=FALSE, warning=FALSE}
+#Save google maps API key to obtain map background
+api_key = ""
+
+#Test dataset
+test_dataset <- data.frame(
+  device = c(6400, 6400, 6400, 6400, 6400, 6400, 6400, 6400),
+  time = as.POSIXct(c("2023-05-03 16:04:05", "2023-05-03 16:04:11", "2023-05-03 16:04:17", 
+                      "2023-05-03 16:04:23", "2023-05-03 16:04:29", "2023-05-03 16:04:36", 
+                      "2023-05-03 16:04:42", "2023-05-03 16:04:48")),
+  prediction = c("Manouvre", "Soar", "Flap", "Soar", "SitStand", "Pecking", "Pecking", "TerLoco"),
+  confidence = c(0.71, 0.98, 0.66, 0.81, 0.78, 0.63, 0.50, 0.50),
+  latitude = c(52.5910872, 52.5916899, 52.5921478, 52.5924163, 52.5924167, 52.5924110, 52.5924019, 52.5923969),
+  longitude = c(5.8516806, 5.8517164, 5.8516090, 5.8516083, 5.8516116, 5.8516152, 5.8516192, 5.8516269),
+  altitude = c(-1, -4, -6, -5, -5, -5, -5, -6),
+  temperature = c(30.5, 30.5, 30.5, 30.5, 30.5, 30.3, 30.2, 30.3))
+
+plot_map <- function(data, zoom = 13, points = 2){
+  #Sort dataset to remove outliers and double predictions
+  data$altitude <- pmax(0, pmin(50, data$altitude))
+  data <- data %>% mutate(prediction = ifelse(confidence < 0.60, "Unknown", prediction))
+  data <- data %>% mutate(prediction = ifelse(altitude > 15 & prediction == "SitStand", 
+                                              "Unknown", prediction))
+  
+  register_google(key = api_key)
+  myColors <- c("Float" = "#80B1D3", "Flap" = "#8DD3C7", "Soar" = "#BEBADA", "Boat" = "#FFFFB3", "Pecking" = "#FB8072", "ExFlap" = "purple", "Manouvre" = "#FDB462", "SitStand" = "#B3DE69", "TerLoco" = "#FCCDE5", "Unknown"="#D3D3D3")
+  custom_colors <- scale_colour_manual(name = "prediction", values = myColors)
+  
+  #Format data
+  data$counttime <- as.numeric(as.POSIXct(data$time)) # unit is seconds
+  data$date <- as.Date(data$time)
+  data$time <- format(as.POSIXct(data$time), format = "%H:%M:%S")
+  data$distance <- c(0, sqrt((diff(data$latitude)^2 + diff(data$longitude)^2))) # in meter
+  data$speed <- c((data$distance / diff(data$counttime)) * 3.6) # km/h
+  data$tempchange <- c(0, diff(data$temperature) / diff(data$counttime))
+  
+  #Prepare for plot limits and title
+  custom_breaks <- data$counttime[seq(1, length(data$counttime), by = 10)]
+  custom_labels <- data$time[seq(1, length(data$time), by = 10)]
+  device_id <- data$device[1]
+  start_time <- as.character(data$time[1])
+  start_date <- as.character(data$date[1])
+  end_time <- as.character(data$time[nrow(data)])
+  end_date <- as.character(data$date[nrow(data)])
+  
+  #Route plot
+  map <- get_googlemap(center = c(lon = median(data$longitude), lat = median(data$latitude)), zoom = zoom, maptype = "satellite") #adjust zoom according to écartement des points
+  Route <- ggmap(map) + 
+    geom_segment(data = data, aes(x = longitude, y = latitude, col = prediction, xend = lead(longitude), yend = lead(latitude)),
+                 arrow = arrow(length = unit(0.2, "cm")), color = "black") + theme_void() +
+    geom_point(data = data, aes(x = longitude, y = latitude, col = prediction), size = points) + 
+    scale_color_manual(name = "Behaviour", values = myColors) + 
+    theme(text = element_text(size = 10), plot.subtitle = element_text(size=7), 
+          legend.title = element_text(size=10), legend.text = element_text(size=10),legend.key.height = unit(0.8, "lines"), 
+          legend.key.width = unit(0.5, "lines"), plot.margin = margin(30, 10, 30, 30)) +
+    labs(title = "Route", x = "Longitude", y = "Latitude",
+         subtitle = paste("Device ", device_id,", from ", start_date, " ",start_time, " until ", end_date, " ", end_time,'\n', sep="")) +
+    guides(col = guide_legend(override.aes = list(size = 2)))  # Adjust the size of the dots in the legend
+
+# Group and arrange smaller plots
+Altitude <- ggplot(data, aes(x = counttime, y = altitude, col = prediction)) + 
+    geom_point(size = points, show.legend = F) + 
+    scale_color_manual(name = "Behaviour", values = myColors) + 
+    scale_x_continuous(breaks = custom_breaks, labels = custom_labels) + 
+    ggtitle("Altitude over time") + 
+    theme_classic(base_size = 10) + 
+    theme(plot.margin = margin(30, 15, 15, 5)) +
+    labs(x = "Time", y = "Altitude (m)")
+  
+  Temperature <- ggplot(data, aes(x = counttime, y = temperature, col = prediction)) + 
+    geom_point(size = points, show.legend = F) + 
+    scale_color_manual(name = "Behaviour", values = myColors) + 
+    scale_x_continuous(breaks = custom_breaks, labels = custom_labels) + 
+    ggtitle("Temperature over time") + 
+    theme_classic(base_size = 10)  + 
+    theme(plot.margin = margin(30, 30, 15, 15)) +
+    labs(x = "Time", y = "Temperature (°C)")
+  
+  Speed <- ggplot(data, aes(x = counttime, y = speed, col = prediction)) + 
+    geom_point(size = points, show.legend = F) + 
+    scale_color_manual(name = "Behaviour", values = myColors) + 
+    scale_x_continuous(breaks = custom_breaks, labels = custom_labels) + 
+    ggtitle("Speed over time") + 
+    theme_classic(base_size = 10)  + 
+    theme(plot.margin = margin(15, 15, 30, 5)) +
+    labs(x = "Time", y = "Speed (km/h)")
+  
+  TempChange <- ggplot(data, aes(x = counttime, y = tempchange, col = prediction)) + 
+    geom_point(size = points, show.legend = F) + 
+    scale_color_manual(name = "Behaviour", values = myColors) + 
+    scale_x_continuous(breaks = custom_breaks, labels = custom_labels) + 
+    ggtitle("Change in temperature over time") + 
+    theme_classic(base_size = 10) + 
+    theme(plot.title = element_text(size=10),plot.margin = margin(15, 30, 30, 15)) +
+    labs(x = "Time", y = "Temperature change per time interval (°C)")
+
+  small_plots <- list(Altitude, Temperature, Speed, TempChange)
+  figure <- arrangeGrob(grobs = small_plots, ncol = 2, nrow=2, padding = unit(10, "pt")) # Use arrangeGrob instead of grid.arrange
+  GG <- arrangeGrob(Route, figure, ncol = 2, padding = unit(10, "pt")) # Use arrangeGrob instead of grid.arrange
+  grid.newpage()
+  grid.draw(GG)
+}
+
+plot_map(test_dataset,18,1) #Adjust zoom and point size for better readability
+
+```
+
+# PDF per types of events
+Creates a PDF file with 1 plot per page for each dataset of a folder. Two vectors, one for zoom and one for point size, can be added if they need to be changed for each plot. If not, default value is used.
+
+```{r PDF plot file}
+map_plot_pdf <- function(trackIDs, zoom_levels, point_sizes, file_name) {
+  pdf(file = paste0("/Desktop/", file_name), width = 21, height = 10, onefile = TRUE)
+  
+  for (i in seq_along(trackIDs)) {
+    trackID <- trackIDs[i]
+    zoom <- zoom_levels[i]
+    points <- point_sizes[i]
+    
+    plot_map(file_names, zoom, points)
+  }
+  
+  dev.off()
+}
+```
+
