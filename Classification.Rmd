@@ -171,12 +171,15 @@ gullsubs_5min <- rm_outliers(gullsubs_5min)
 Based on the method developed by McClintock & Michelot (2018), we used a hidden Markov model (HMM) to detect area-restricted search (ARS) moments from stationary moments and transit & exploratory flights. We used the mumentuHMM package (McClintock & Michelot, 2022) developed by the authors for this purpose.
 It uses the step length and turning angle parameters, therefore using latitude and longitude collected by the device.
 Theses parameters are fixed for each of the 4 states we wish to differentiate (Area-restricted search, Stationary, Exploratory flight and Transit flight) and selected to be the best fitting parameters, determined with randomly generated parameters and maximum likelihood on a subset of the data (see "HMM" code file, which details this process).
-It uses the Viterbi algorithm to extract the state of each data point determined by the model.
+Then, the Viterbi algorithm is used to extract the state of each data point determined by the model.
 
-```{r HMM}
-# Import models with saved parameters
-best_model1 <- readRDS('best_model_1min.rds')
-best_model5 <- readRDS("best_model_5min.rds")
+```{r HMM, message=FALSE, warning=FALSE}
+# Import models with saved parameters from GitHub
+best_model1 <- readRDS(gzcon(url("https://github.com/EManzo13/Caspian-gull-NL/raw/main/Models/best_model_1min.rds")))
+best_model5 <- readRDS(gzcon(url("https://github.com/EManzo13/Caspian-gull-NL/raw/main/Models/best_model_5min.rds")))
+# Import models from working directory
+# best_model1 <- readRDS("best_model_1min.rds")
+# best_model5 <- readRDS("best_model_5min.rds")
 
 fit_hmm <- function(data,best_model, same_device = TRUE){ #same_device argument is used when all data doesn't have the same device number but are still grouped in the same dataset
   if(same_device == F){ 
@@ -253,7 +256,7 @@ HMM_states <- group_tracks()
 
 The reassembled tracks can be plotted to see the efficiency of the model.
 
-```{r Plot tracks}
+```{r Plot tracks, warning=FALSE}
 stateNames <- c("ARS", "Stationary", "Exploratory", "Transit")
 myColors <- c("ARS" = "#FB8072","Stationary" = "#B3DE69", "Exploratory" = "#FDB462","Transit" = "#80B1D3")
 track_plot <- function(data,track){
@@ -274,13 +277,16 @@ track_plot <- function(data,track){
 
 # All tracks
 for(i in min(HMM_states$track):max(HMM_states$track)){
-  plot <- track_plot(HMM_states,i)
+  if(i <= max(HMM_states$track)){
+    plot <- track_plot(HMM_states,i)
   print(plot)
   readline(prompt = "Press [enter] to continue to the next track")
+  }
+  else {stop()}
 }
 
 # Specific track for a certain device and date
-HMM_states %>% filter(device_info_serial == 6401 & date == "2023-05-16") %>%
+HMM_states %>% filter(device_info_serial == 6387 & date == "2023-05-01") %>%
   pull(track) %>%
   unique() -> track_nb #get track number with device nb and date
 track_plot(HMM_states,track_nb)
@@ -292,6 +298,7 @@ Now that each data point has been matched with an activity type by the HMM, we w
 
 ```{r Feeding events sequence}
 feeding_sequences <- function(data = HMM_states,last_id_data = 0){ #last_id_data argument for digitisation of tracks following the ones previously done
+
   # Keep the ARS sequences and data points around it, removes full Transit sequences 
   data$keep <- FALSE
   n <- nrow(data)
@@ -414,6 +421,7 @@ feeding_sequences <- function(data = HMM_states,last_id_data = 0){ #last_id_data
       latitude = median(latitude),
       longitude = median(longitude),
       .groups = 'drop')
+  feeding_events <- feeding_events %>% arrange(start_time) %>% mutate(event_id = row_number())
   feeding_events <- feeding_events[which(feeding_events$start_time != feeding_events$end_time),] #removes event w/ 1 point
   
   # Saves the final table as a .csv table in the working directory
@@ -433,7 +441,8 @@ The last file produced is used as in input in the behavioural model to obtain th
 
 # 3- Classification of the events
 ## A) Import and compile
-First, we will import and merge all the observations to have one file per individual. It is noteworthy that as the output of this behaviooural model, the files are named with the device number, starting and ending date & time (for example: '6387_2023-05-01 07/32/10_2023-05-01 07/46/34.csv'), which is used here to fill in the columns "device number", "start date & time" and "end date & time". It is then used to match with the events detected by the HMM to obtain the ID of the event that was previously attributed (in the table obtained with the "feeding_sequences()" function).
+First, we will import and merge all the observations to have one file per individual. It is noteworthy that as the output of this behavioural model, the files are named with the device number, starting and ending date & time (for example: '6387_2023-05-01 07/32/10_2023-05-01 07/46/34.csv'), which is used here to fill in the columns "device number", "start date & time" and "end date & time". It is then used to match with the events detected by the HMM to obtain the ID of the event that was previously attributed (in the table obtained with the "feeding_sequences()" function).
+The output file should be the same as the "HMM_output.csv" file in the "Trial_datasets" folder.
 
 ```{r Merge files}
 import_and_merge <- function(folder_name,feeding_sequences_table){ 
