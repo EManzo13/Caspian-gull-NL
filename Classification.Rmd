@@ -50,11 +50,10 @@ import_accelerometer_data <- function(folder_name){
   data <- data %>% arrange(device_info_serial, date_time)
   return(data)
 }
-# data <- import_accelerometer_data("6402")
+# accelerometer_data_6387 <- import_accelerometer_data("6387")
 
 # Here, only trial file to upload:
-Trial <- GET("https://api.github.com/repos/eldarrak/RDM-capture-reencounter-with-misidentification/contents/results")
-
+Trial <- read.csv('https://raw.githubusercontent.com/EManzo13/Caspian-gull-NL/refs/heads/main/Trial_datasets/Trial_accelerometer.csv')
 
 datasets_HMM <- function(data){
   # Format date and time
@@ -163,7 +162,7 @@ rm_outliers <- function(data){
   return(data)
 }
 
-datasets_HMM(data)
+datasets_HMM(Trial)
 gullsubs_1min <- rm_outliers(gullsubs_1min)
 gullsubs_5min <- rm_outliers(gullsubs_5min)
 ```
