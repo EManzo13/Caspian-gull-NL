@@ -1,0 +1,182 @@
+---
+title: "Behaviour_analysis"
+author: "Emilie Manzo"
+date: "2024-09-10"
+output: html_document
+---
+
+```{r load packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(zCompositions)
+library(multcompView)
+library(compositions)
+library(grid)
+library(easyCODA)
+library(factoextra)
+library(ggrepel)
+library(ggforce)
+```
+
+# Behaviour analysis
+Conducted on the trial dataset of feeding events classified by hand, composed of proportions of behaviour for each feeding event as lines and behaviour proportion as well as the event type as columns.
+
+## Data transformation (centred log-ratio)
+```{r data transformation}
+logratio_transfo <<- function(data, id_column_name){
+    data <- data %>% relocate(id_column_name, everything())
+    # Replace the zeros
+    transformed_data <- data %>%
+      mutate(across(-id_column_name, ~ ifelse(. == 0, 0.001, .))) # Replace zeros with 0.001
+    dl <- rep(0.001, ncol(transformed_data) - 1)
+    
+    # Apply multiplicative lognormal replacement for zeros
+    transformed_data[,2:ncol(transformed_data)] <- zCompositions::multLN(as.matrix(transformed_data[, 2:ncol(transformed_data)]), label = 0.001, dl = dl, z.warning = 1)
+    
+    #Apply centered log ratio transfo
+    transformed_data[,2:ncol(transformed_data)] <- as.data.frame(compositions::clr(transformed_data[, 2:ncol(transformed_data)]))
+    
+    return(transformed_data)
+}
+
+transformed_data <- logratio_transfo(trial_data, "event_id")
+```
+
+## ANOVA and post-hoc test
+Performs an ANOVA and post-hoc Tukey's HSD test for each behaviour column of the transformed data.
+```{r tests on behaviour}
+results <- list()
+tukey_results <- list()
+groupings <- list()
+
+# Perform tests
+for (behaviour in colnames(transformed_data)[1:(ncol(transformed_data)-2)]) {
+  # Perform ANOVA and post-hoc tests
+  formula <- as.formula(paste(behaviour, "~ event_type"))
+  aov_result <- aov(formula, data = transformed_data)
+  results[[behaviour]] <- aov_result
+  tukey_results[[behaviour]] <- TukeyHSD(aov_result)
+  
+  # Display diagnostic plots
+  par(mfrow = c(3, 2))
+  plot(aov_result, main = paste("Diagnostic Plots for", behaviour))
+  residuals <- residuals(aov_result)
+  hist(residuals, main = paste("Histogram of Residuals for", behaviour), xlab = "Residuals", col = "lightblue", border = "white")
+  
+  # Generate group letters for the Tukey HSD test results
+  tukey_groups <- multcompLetters(tukey_results[[behaviour]]$event_type[, 4])
+  letters_df <- data.frame(multcompLetters(tukey_results[[behaviour]]$event_type[, 4])$Letters)
+  colnames(letters_df)[1] <- "Letter"
+  letters_df$event_type <- rownames(letters_df)
+  groupings[[behaviour]] <- letters_df
+  
+  # Pause to review plots before moving to the next behaviour
+  readline(prompt = "Press [enter] to continue to the next behaviour")
+}
+
+# Print ANOVA and Tukey's HSD test results
+for (behaviour in names(results)) {
+  cat("\n\n-------------------------------------------------------\nANOVA result for", behaviour, ":\n")
+  print(summary(results[[behaviour]]))
+  cat("\nTukey HSD test result for", behaviour, ":\n")
+  print(tukey_results[[behaviour]])
+  cat("\nGroup letters for", behaviour, ":\n")
+  print(groupings[[behaviour]])
+}
+```
+
+## Plots
+Plots the proportions of behaviour according to event type, in a stacked plot per event type first for overall visualisation and then faceted according to behaviours to represent results of the tests. Applied on the previously described dataset containing proportions of behaviour for each feeding event.
+
+```{r Plots}
+## Stacked plot
+myColors <- c("Float" = "#80B1D3", "Soar" = "#8DD3C7", "ExFlap" = "#BEBADA", "Boat" = "#FFFFB3", "Pecking" = "#FB8072", "Flap" = "#CC99FF", "TerLoco" = "#FDB462", "SitStand" = "#B3DE69", "Manouvre" = "#FCCDE5", "Unknown"="#D3D3D3")
+
+ggplot(trial_data, aes(x = event_type, y = proportion)) +
+  geom_bar(aes(fill = prediction), stat = "identity",  width = 0.8) +
+  scale_fill_manual(values = myColors) + labs(fill = "Behaviour")+
+  ggtitle("Proportion of predicted behaviours per type of event") +
+  ylab("Proportion") +
+  xlab("Type of Event") +
+  scale_x_discrete(limits = c("Canal", "Fishing", "Lake", "Fykes", "Agri", "Garbage"),
+                   labels = c("Agri" = "Agricultural\nlands", "Fishing" = "IJsselmeer", "Lake" = "Smaller\nlakes","Canal" = 'Canals')) +
+  theme(legend.position = "right") + theme_classic()
+
+
+## Faceted plot
+summary_data <- trial_data %>%
+  group_by(event_type) %>%
+  summarise(across(starts_with(c("Pecking", "SitStand", "TerLoco", "Soar", "Flap", "Manouvre", "ExFlap", "Float")),
+                   list(mean = ~mean(.), se = ~sd(.)/sqrt(n())), .names = "{col}_{fn}"))
+
+# Convert to long format for ggplot
+summary_long <- summary_data %>%
+  pivot_longer(cols = -event_type, 
+               names_to = c("Behaviour", ".value"), 
+               names_pattern = "(.*)_(mean|se)")
+summary_long <- summary_long %>%
+  arrange(Behaviour, event_type) %>% relocate(Behaviour, event_type, everything())
+
+# Extract and format significance letters for all behaviors
+letters_data <- bind_rows(lapply(names(groupings), function(behaviour) {
+  letters_df <- groupings[[behaviour]]
+  letters_df <- letters_df %>%
+    mutate(Behaviour = behaviour)
+  return(letters_df)
+}))
+
+summary_long <- summary_long %>%
+  left_join(letters_data, by = c("event_type" = "event_type", "Behaviour" = "Behaviour"))
+
+# Add y_position for letters
+summary_long <- summary_long %>%
+  mutate(y_position = mean + se + ifelse(mean > 5, 0.2,0.05))
+
+# Plot the data
+dev.off()
+ggplot(summary_long, aes(x = event_type, y = mean, fill = event_type)) +
+  geom_bar(stat = "identity", position = "dodge", col = 'black') +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), 
+                width = 0.2, position = position_dodge(0.9)) +
+  geom_text(aes(y = y_position, label = Letter), vjust = -0.5, size = 3) +
+  facet_wrap(~ Behaviour, scales = "free_y", nrow = 2, ncol = 4) +
+  labs(x = "Event Type", y = "Mean Proportion (%)", fill = 'Event type') +
+  theme_minimal() +
+  scale_fill_brewer(palette = 'Set3',
+                    limits = c("Canal", "IJsselmeer", "Lake", "Coast", "Agri", "Garbage"),
+                    labels = c("Agri" = "Agricultural\nlands", "Lake" = "Smaller\nlakes","Canal" = 'Canals')) +
+  scale_x_discrete(limits = c("Canal", "IJsselmeer", "Lake", "Coast", "Agri", "Garbage")) +
+  theme(strip.text = element_text(face = "bold", size = 10),  # Adjust strip text size
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.key.spacing.y = unit(5, "pt"))
+```
+
+# Build LDA model
+LDA model based on hand classified events to differenciate events in Canals and in Agricultural lands. Applied on the same trial dataset, with events as lines and behaviour proportions as columns. 
+```{r LDA model}
+LDAfun <- function(dataset, category_column){
+  training.events <- createDataPartition(dataset[[category_column]], p = 0.8, list = FALSE) 
+  train.data <- dataset[training.events, ] 
+  test.data <- dataset[-training.events, ] 
+  
+  preproc.parameter <- preProcess(train.data[, -which(names(train.data) == category_column)], method = c("center", "scale")) 
+  train.transform <- predict(preproc.parameter, train.data[, -which(names(train.data) == category_column)]) 
+  test.transform <- predict(preproc.parameter, test.data[, -which(names(test.data) == category_column)]) 
+  
+  train.transform[[category_column]] <- train.data[[category_column]]
+  test.transform[[category_column]] <- test.data[[category_column]]
+  
+  LDA_model <<- lda(as.formula(paste(category_column, "~ .")), data = train.transform) 
+  
+  predictions <- predict(LDA_model, test.transform) 
+  accuracy <- mean(predictions$class == test.transform[[category_column]]) 
+  print(paste("Model accuracy:", accuracy))
+}
+
+LDA_dataset <- transformed_data %>% filter(event_type_hand == "Canal" | event_type_hand == "Agri")
+LDA_dataset$event_type_hand <- as.character(LDA_dataset$event_type_hand)
+LDA_dataset$event_type_hand <- as.factor(LDA_dataset$event_type_hand)
+LDA_dataset <- LDA_dataset[,-1] #removes ID column (should only keep the behaviour columns and the class of the events)
+LDAfun(LDA_dataset,"event_type") 
+saveRDS(LDA_model, "LDA_model.rds") #Saves the model
+```
