@@ -590,12 +590,13 @@ The input of the classifying function should be a table containing information o
 
   # Construct the path and get the list of files in the folder
   data_dir <- file.path(temp_import_dir, folder_path)
-  files_list <- dir_ls(path = data_dir, glob = "*.csv")
+  files_list <- dir_ls(path = data_dir)
   
   # Import and merge
-  behav_event <- read.csv(file_path)
-  LDA_model <- readRDS("LDA_model.rds")
-
+  LDA_model <<- readRDS(files_list[1])
+  ijsselmeer_coast <<- readRDS(files_list[4])
+  lakesNL <<- readRDS(files_list[5])
+  lakes_buffer <<- readRDS(files_list[6])
 
 
 load_classification_objects <- function(){
