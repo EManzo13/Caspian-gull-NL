@@ -26,6 +26,8 @@ library(magick)
 library(zCompositions)
 library(multcompView)
 library(compositions)
+library(git2r)
+library(fs)
 ```
 
 # 1- Extract feeding events from location data
@@ -441,26 +443,39 @@ The last file produced is used as in input in the behavioural model to obtain th
 
 # 3- Classification of the events
 ## A) Import and compile
-First, we will import and merge all the observations to have one file per individual. It is noteworthy that as the output of this behavioural model, the files are named with the device number, starting and ending date & time (for example: '6387_2023-05-01 07/32/10_2023-05-01 07/46/34.csv'), which is used here to fill in the columns "device number", "start date & time" and "end date & time". It is then used to match with the events detected by the HMM to obtain the ID of the event that was previously attributed (in the table obtained with the "feeding_sequences()" function).
+First, we will import one by one and merge the files put out by the behavioural model to have one file per individual (one file for the trial).
+It is noteworthy that as the output of this behavioural model, the files are named with the device number, starting and ending date & time (for example: '6387_2023-05-01 07/32/10_2023-05-01 07/46/34.csv'), which is used here to fill in the columns "device number", "start date & time" and "end date & time". It is then used to match with the events detected by the HMM to obtain the ID of the event that was previously attributed (in the table obtained with the "feeding_sequences()" function).
 The output file should be the same as the "HMM_output.csv" file in the "Trial_datasets" folder.
 
 ```{r Merge files}
-import_and_merge <- function(folder_name,feeding_sequences_table){ 
-  setwd(paste0("path",folder_name))
+
+import_and_merge <- function(feeding_sequences_table){
+  # Set the GitHub repository and folder path
+  folder_path = "Trial_datasets/Behavioural_model_output"
+  repo_url <- "https://github.com/EManzo13/Caspian-gull-NL"
+
+  # Clone the GitHub repository to a temporary directory
+  temp_import_dir <- tempfile("githubRepo")
+  clone(url = repo_url, local_path = temp_import_dir)
+
+  # Construct the path and get the list of files in the folder
+  data_dir <- file.path(temp_import_dir, folder_path)
+  files_list <- dir_ls(path = data_dir, glob = "*.csv")
+
+# Import and merge
   all_behav_events <- data.frame()
-  names <- list.files()
   imported_event_ids <- numeric()
   
-  for (i in 1:length(names)){
-    behav_event <- read.csv(names[i])
-    behav_event$time <- as.POSIXct(behav_event$time)
+  for (file_path in files_list){
+    behav_event <- read.csv(file_path)
+    behav_event$date_time <- as.POSIXct(behav_event$date_time)
     
-    file_info <- strsplit(names[i], "_|\\.csv")[[1]]
+    file_info <- strsplit(basename(file_path), "_\"|\"_\"|\".csv")[[1]]
     device <- file_info[1]
     start_time_file <- as.POSIXct(file_info[2], format = "%Y-%m-%d %H:%M:%OS")
     end_time_file <- as.POSIXct(file_info[3], format = "%Y-%m-%d %H:%M:%OS")
     
-      matched_event <- feeding_sequences_table %>%
+    matched_event <- feeding_sequences_table %>%
       filter(device_info_serial == device,
              start_time <= start_time_file,
              end_time >= end_time_file)
@@ -486,14 +501,14 @@ import_and_merge <- function(folder_name,feeding_sequences_table){
   }
   return(all_behav_events)
 }
-Trial_behaviour_combined <- import_and_merge("Trial",events_seq_trial)
+Trial_behaviour_combined <- import_and_merge(events_seq_trial)
 
 ## Check all events detected by the HMM are imported: number of events per individual
 Trial_behaviour_combined %>%
-  group_by(device) %>%
+  group_by(device_info_serial) %>%
   summarise(n_events_seq = n_distinct(event_id)) %>% 
-  bind_cols(events_seq %>% group_by(device_info_serial) %>% 
-              summarise(n_events_import = n()))
+  bind_cols(events_seq_trial %>% group_by(device_info_serial) %>% 
+              summarise(n_events_imported = n()))
 ```
 
 ## B) Filter and compute proportions 
@@ -502,11 +517,16 @@ Then, we will reformat the behavioural data per folder to have one file per indi
 
 ```{r Filter and compute proportions}
 filter_behav <- function(data){
-  # Mutate the prediction column based on confidence and altitude
-  data_filtered <- data_filtered %>% 
+  # Filter the data where index == 0 and remove interpretation from the other model
+  data_filtered <- data %>% filter(index == 0)
+  
+  # Mutate the prediction column based on confidence and altitude, and remove the impossible ones
+   data_filtered <- data_filtered %>% 
     mutate(prediction = ifelse(confidence < 0.60, "Unknown", prediction)) %>% 
     mutate(altitude = ifelse(altitude > 50 & prediction == "SitStand" & confidence >= 0.80, 0, altitude)) %>% 
-    mutate(prediction = ifelse(altitude > 50 & prediction == "SitStand" & confidence < 0.80, "Unknown", prediction))
+    mutate(prediction = ifelse(altitude > 50 & prediction == "SitStand" & confidence < 0.80, "Unknown", prediction)) %>% 
+    mutate(prediction = ifelse(prediction == "Boat", "Unknown", prediction))
+ 
   #Format the variables
   data_filtered$device = as.factor(data_filtered$device)
   data_filtered$prediction = as.factor(data_filtered$prediction)
@@ -542,14 +562,14 @@ behaviour_proportions <- function(data, feeding_sequences_table) {
   reshaped_proportions <- left_join(reshaped_proportions, feeding_sequences_table, by = "event_id")
   
   # Remove events without terrestrial behaviour
-  reshaped_proportions <- reshaped_proportions[-which(reshaped_proportions$Flap + reshaped_proportions$ExFlap + reshaped_proportions$Soar + x = reshaped_proportions$Manouvre == 100),]
-  reshaped_proportions <- reshaped_proportions %>% arrange(start_time)
-  reshaped_proportions <- reshaped_proportions %>% mutate(event_id = row_number())
+  if(length(which(reshaped_proportions$Flap + reshaped_proportions$ExFlap + reshaped_proportions$Soar + reshaped_proportions$Manouvre == 100))>0){
+    reshaped_proportions <- reshaped_proportions[-which(reshaped_proportions$Flap + reshaped_proportions$ExFlap + reshaped_proportions$Soar + reshaped_proportions$Manouvre == 100),]
+      reshaped_proportions <- reshaped_proportions %>% arrange(start_time) %>% mutate(event_id = row_number())
+  }
 
   return(reshaped_proportions)
 }
-Trial_summary <- behaviour_proportions(Trial_filtered, feeding_sequences_table)
-
+Trial_summary <- behaviour_proportions(Trial_filtered, events_seq_trial)
 ```
 
 ## C) Classification
@@ -559,6 +579,25 @@ The input of the classifying function should be a table containing information o
 
 ```{r classification}
 # Load required datasets, model and function
+
+# Set the GitHub repository and folder path
+  folder_path = "Models"
+  repo_url <- "https://github.com/EManzo13/Caspian-gull-NL"
+
+  # Clone the GitHub repository to a temporary directory
+  temp_import_dir <- tempfile("githubRepo")
+  clone(url = repo_url, local_path = temp_import_dir)
+
+  # Construct the path and get the list of files in the folder
+  data_dir <- file.path(temp_import_dir, folder_path)
+  files_list <- dir_ls(path = data_dir, glob = "*.csv")
+  
+  # Import and merge
+  behav_event <- read.csv(file_path)
+  LDA_model <- readRDS("LDA_model.rds")
+
+
+
 load_classification_objects <- function(){
   setwd("/Users/emiliemanzo/Desktop/Internship/Models")
   lakes_buffer <<- readRDS("lakes_buffer.rds")
