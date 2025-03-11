@@ -32,10 +32,10 @@ library(fs)
 
 # 1- Extract feeding events from location data
 ## A) Data preparation
-First, we will prepare the data streams for the model. To do so, we will import accelerometer data (containing location information) and compile it in one file per device number, keep only the location when the bird is out of the colony, separate in distinct data sets according to resolution (i.e. the time difference between each data point, which were either 1 minute or 5 minutes), and finally remove outliers.
+First, we will prepare the data streams for the model. To do so, we will import accelerometer data (containing location information) and compile it in one file per device number, keep only the location when the bird is out of the colony, split in distinct data sets according to resolution (i.e. the time difference between each data point, which were either 1 minute and less or 5 minutes), and finally remove outliers.
 
-```{r Prep data}
-#Used for when there are several files for the same individual in a folder
+```{r Prep data, message=FALSE, warning=FALSE}
+# If stored several files for the same individual in the same folder
 import_accelerometer_data <- function(folder_name){
   setwd(paste0(path,folder_name))
   data <- data.frame()
@@ -57,6 +57,7 @@ import_accelerometer_data <- function(folder_name){
 # Here, only trial file to upload:
 Trial <- read.csv('https://raw.githubusercontent.com/EManzo13/Caspian-gull-NL/refs/heads/main/Trial_datasets/Trial_accelerometer.csv')
 
+# Prepare dataset for the model, saved automatically as "gullsubs_1min" and "gullsubs_5min"
 datasets_HMM <- function(data){
   # Format date and time
   data$counttime <- as.numeric(as.POSIXct(data$date_time)) # unit is seconds
@@ -85,10 +86,10 @@ datasets_HMM <- function(data){
     filter(cumu_sum %/% interval != lag(cumu_sum %/% interval, default = -1)) %>%
     filter(colony == "No") %>% dplyr::select(-time_diff, -cumu_sum,-colony)
   gullout <- gullout %>%
-    mutate(time_diff = counttime - lag(counttime, default = first(counttime))) # recalculate new time diff with selected observations
+    mutate(time_diff = counttime - lag(counttime, default = first(counttime))) #recalculate new time difference with selected observations
   gullout <- gullout %>%
     mutate(dist_diff = c(0, distGeo(matrix(c(longitude[-n()], latitude[-n()]), ncol = 2), 
-                                    matrix(c(longitude[-1], latitude[-1]), ncol = 2)))) # calculate distance difference
+                                    matrix(c(longitude[-1], latitude[-1]), ncol = 2)))) #calculate distance difference
   
   # Sequence events according to resolution, time difference and dist difference and digitise them
   gullout$ID = 1
@@ -169,7 +170,7 @@ gullsubs_1min <- rm_outliers(gullsubs_1min)
 gullsubs_5min <- rm_outliers(gullsubs_5min)
 ```
 
-## B) Apply hidden-Markov model
+## B) Apply hidden Markov model (HMM)
 Based on the method developed by McClintock & Michelot (2018), we used a hidden Markov model (HMM) to detect area-restricted search (ARS) moments from stationary moments and transit & exploratory flights. We used the mumentuHMM package (McClintock & Michelot, 2022) developed by the authors for this purpose.
 It uses the step length and turning angle parameters, therefore using latitude and longitude collected by the device.
 Theses parameters are fixed for each of the 4 states we wish to differentiate (Area-restricted search, Stationary, Exploratory flight and Transit flight) and selected to be the best fitting parameters, determined with randomly generated parameters and maximum likelihood on a subset of the data (see "HMM" code file, which details this process).
@@ -179,7 +180,7 @@ Then, the Viterbi algorithm is used to extract the state of each data point dete
 # Import models with saved parameters from GitHub
 best_model1 <- readRDS(gzcon(url("https://github.com/EManzo13/Caspian-gull-NL/raw/main/Models/best_model_1min.rds")))
 best_model5 <- readRDS(gzcon(url("https://github.com/EManzo13/Caspian-gull-NL/raw/main/Models/best_model_5min.rds")))
-# Import models from working directory
+# To import models from working directory
 # best_model1 <- readRDS("best_model_1min.rds")
 # best_model5 <- readRDS("best_model_5min.rds")
 
@@ -187,12 +188,12 @@ fit_hmm <- function(data,best_model, same_device = TRUE){ #same_device argument 
   if(same_device == F){ 
     data <- data %>%
       mutate(device_real = device_info_serial,
-             device_info_serial = device_info_serial[1])} #transform be the same device nb for all data or following df_to_list creates 1 dataframe per animal
+             device_info_serial = device_info_serial[1])} #must be the same device nb for all data, or following df_to_list creates 1 dataframe per animal, which isn't supported by the model
   
   d.list<- df_to_list(data, ind = "device_info_serial") 
   list1<- map(d.list, ~prepData(., type = "UTM", coordNames = c("x","y")))
   
-  stepPar <- as.vector(best_model$mle$step[c(1,3,5,7,2,4,6,8)]) #saves the parameters defined in the best model in the right order to be applied
+  stepPar <- as.vector(best_model$mle$step[c(1,3,5,7,2,4,6,8)]) #saves the parameters defined in the best model in the right order for application
   if (length(which(list1[[1]]$step == 0)) > 0){
     zero_mass <- rep(length(which(list1[[1]]$step == 0))/length(list1[[1]]$step),4)
     stepPar <- c(stepPar,zero_mass)
@@ -221,12 +222,12 @@ fit_hmm <- function(data,best_model, same_device = TRUE){ #same_device argument 
   HMM_state <- state_mapping[HMM_state]
   return(HMM_state)
 }
-gullsubs_1min$HMM_state <- fit_hmm(gullsubs_1min,best_model1) #adds HMM_states column
+gullsubs_1min$HMM_state <- fit_hmm(gullsubs_1min,best_model1) #adds HMM_states column to the dataset
 gullsubs_5min$HMM_state <- fit_hmm(gullsubs_5min,best_model5)
 
-# Re-assemble the two datasets in one, and link tracks back together 
+# Re-assemble the two datasets in one, and link same tracks with different resolutions back together 
 group_tracks <- function(dataset_1min = gullsubs_1min, dataset_5min = gullsubs_5min){
-  #Merge datasets with states detected by model
+  # Merge datasets with states detected by model
   HMM_states <- gullsubs_1min %>% dplyr::select(device_info_serial, date_time, time_diff, 
                                                 HMM_state, ID, resolution, dist_diff, x,y,latitude,longitude,
                                                 temperature, altitude,date,counttime) %>%
@@ -236,7 +237,7 @@ group_tracks <- function(dataset_1min = gullsubs_1min, dataset_5min = gullsubs_5
     arrange(ID,date_time)
   HMM_states$HMM_state <- as.factor(HMM_states$HMM_state)
   HMM_states <- HMM_states %>%
-    mutate(time_diff = counttime - lag(counttime, default = first(counttime))) %>% # recalculate new time diff with selected observations
+    mutate(time_diff = counttime - lag(counttime, default = first(counttime))) %>% # Recalculate new time difference with selected observations
     mutate(dist_diff = c(0, distGeo(matrix(c(longitude[-n()], latitude[-n()]), ncol = 2), 
                                     matrix(c(longitude[-1], latitude[-1]), ncol = 2))))
   
@@ -282,26 +283,26 @@ for(i in min(HMM_states$track):max(HMM_states$track)){
   if(i <= max(HMM_states$track)){
     plot <- track_plot(HMM_states,i)
   print(plot)
-  readline(prompt = "Press [enter] to continue to the next track")
   }
   else {stop()}
 }
 
-# Specific track for a certain device and date
-HMM_states %>% filter(device_info_serial == 6387 & date == "2023-05-01") %>%
-  pull(track) %>%
-  unique() -> track_nb #get track number with device nb and date
-track_plot(HMM_states,track_nb)
+## Plot a specific track for a certain device and date
+# HMM_states %>% filter(device_info_serial == 6387 & date == "2023-05-01") %>%
+#   pull(track) %>%
+#   unique() -> track_nb #get track number with device nb and date
+# track_plot(HMM_states,track_nb)
 
 ```
 
-## C) Final output
-Now that each data point has been matched with an activity type by the HMM, we want to extract the start and end time of each feeding event in a .txt document with 3 columns: device number, start date and time, and end date and time. This document is automatically saved in the working diretory under the name "imput_devicenb.csv"; and the function returns a table with a summary of all detected events with these three columns as well as location information.
+## C) Final output of the first model
+Now that each data point has been matched with an activity type by the HMM, we want to extract the start and end time of each feeding event in a .txt document with 3 columns: device number, start date and time, and end date and time. This document is automatically saved in the working directory under the name "input_devicenb.csv"; and the function returns a table with a summary of all detected events with these three columns as well as location information.
+The output file should be the same as the "HMM_output.csv" file in the "Trial_datasets" folder.
 
-```{r Feeding events sequence}
+```{r Feeding events sequence, message=FALSE, warning=FALSE}
 feeding_sequences <- function(data = HMM_states,last_id_data = 0){ #last_id_data argument for digitisation of tracks following the ones previously done
 
-  # Keep the ARS sequences and data points around it, removes full Transit sequences 
+  # Keep the ARS sequences and data points around it, remove full Transit sequences
   data$keep <- FALSE
   n <- nrow(data)
   device <- data$device_info_serial[1]
@@ -326,7 +327,7 @@ feeding_sequences <- function(data = HMM_states,last_id_data = 0){ #last_id_data
   
   # Merge consecutive ARS sequences into the same feeding event (based on time and location)
   active <- active %>%
-    mutate(time_diff = counttime - lag(counttime, default = first(counttime))) %>% #recalculate new time diff with selected observations
+    mutate(time_diff = counttime - lag(counttime, default = first(counttime))) %>%   # Recalculate new time difference with selected observations
     mutate(dist_diff = c(0, distGeo(matrix(c(longitude[-n()], latitude[-n()]), ncol = 2), 
                                     matrix(c(longitude[-1], latitude[-1]), ncol = 2))))
   active$event_seq = 1
@@ -426,7 +427,7 @@ feeding_sequences <- function(data = HMM_states,last_id_data = 0){ #last_id_data
   feeding_events <- feeding_events %>% arrange(start_time) %>% mutate(event_id = row_number())
   feeding_events <- feeding_events[which(feeding_events$start_time != feeding_events$end_time),] #removes event w/ 1 point
   
-  # Saves the final table as a .csv table in the working directory
+  # Save the final table as a .csv table in the working directory
   feeding_events$device_info_serial <- as.numeric(as.character(feeding_events$device_info_serial))
   output_file_name <- paste0("input_",device,".csv")
   feeding_events %>% dplyr::select(device_info_serial,start_time,end_time) %>%
@@ -435,19 +436,19 @@ feeding_sequences <- function(data = HMM_states,last_id_data = 0){ #last_id_data
   return(feeding_events)
 }
 events_seq_trial <- feeding_sequences()
+print(events_seq_trial)
 ```
 
 # 2- Behavioural model
 
-The last file produced is used as in input in the behavioural model to obtain the behavioural sequence of each feeding event. The output is one file per event, with each line being a location point and the associated behaviour. The files for each individual is stored in the same folder. 
+The last file produced and automatically saved is used as in input in the behavioural model to obtain the behavioural sequence of each feeding event. The output is one file per event, with each line being a location point and the associated behaviour. All files for one individual are stored in the same folder. 
 
 # 3- Classification of the events
 ## A) Import and compile
 First, we will import one by one and merge the files put out by the behavioural model to have one file per individual (one file for the trial).
-It is noteworthy that as the output of this behavioural model, the files are named with the device number, starting and ending date & time (for example: '6387_2023-05-01 07/32/10_2023-05-01 07/46/34.csv'), which is used here to fill in the columns "device number", "start date & time" and "end date & time". It is then used to match with the events detected by the HMM to obtain the ID of the event that was previously attributed (in the table obtained with the "feeding_sequences()" function).
-The output file should be the same as the "HMM_output.csv" file in the "Trial_datasets" folder.
+It is noteworthy that as outputs of the behavioural model, the files are named with the device number, starting and ending date & time (for example: '6387_2023-05-01 07/32/10_2023-05-01 07/46/34.csv'). The file name is used here to fill in the columns "device number", "start date & time" and "end date & time". It is then used to match with the events detected by the HMM to obtain the ID of the event that was previously attributed (in the table obtained with the "feeding_sequences()" function).
 
-```{r Merge files}
+```{r Merge files,warning=FALSE, message=FALSE,echo=T,results="hide",quiet=TRUE}
 
 import_and_merge <- function(feeding_sequences_table){
   # Set the GitHub repository and folder path
@@ -462,7 +463,7 @@ import_and_merge <- function(feeding_sequences_table){
   data_dir <- file.path(temp_import_dir, folder_path)
   files_list <- dir_ls(path = data_dir, glob = "*.csv")
 
-# Import and merge
+  # Import and merge
   all_behav_events <- data.frame()
   imported_event_ids <- numeric()
   
@@ -502,8 +503,10 @@ import_and_merge <- function(feeding_sequences_table){
   return(all_behav_events)
 }
 Trial_behaviour_combined <- import_and_merge(events_seq_trial)
+```
 
-## Check all events detected by the HMM are imported: number of events per individual
+```{r print importation result,warning=FALSE, message=FALSE,echo=T}
+# Check all events detected by the HMM are imported: number of events per individual in both tables
 Trial_behaviour_combined %>%
   group_by(device_info_serial) %>%
   summarise(n_events_seq = n_distinct(event_id)) %>% 
@@ -515,7 +518,7 @@ Trial_behaviour_combined %>%
 We will now filter the behavioural observations to mark the ones with a low interpretation confidence (estimated by the model) as Unknown, as well as the improbable ones (i.e. the ones with a high altitude and sitting behaviour).
 Then, we will reformat the behavioural data per folder to have one file per individual, with one line per event containing the proportions of each behaviour as well as the event ID. 
 
-```{r Filter and compute proportions}
+```{r Filter and compute proportions, message=FALSE, warning=FALSE}
 filter_behav <- function(data){
   # Filter the data where index == 0 and remove interpretation from the other model
   data_filtered <- data %>% filter(index == 0)
@@ -527,7 +530,7 @@ filter_behav <- function(data){
     mutate(prediction = ifelse(altitude > 50 & prediction == "SitStand" & confidence < 0.80, "Unknown", prediction)) %>% 
     mutate(prediction = ifelse(prediction == "Boat", "Unknown", prediction))
  
-  #Format the variables
+  # Format the variables
   data_filtered$device = as.factor(data_filtered$device)
   data_filtered$prediction = as.factor(data_filtered$prediction)
   
@@ -570,17 +573,19 @@ behaviour_proportions <- function(data, feeding_sequences_table) {
   return(reshaped_proportions)
 }
 Trial_summary <- behaviour_proportions(Trial_filtered, events_seq_trial)
+print(Trial_summary)
 ```
 
 ## C) Classification
-As explained in the thesis, the classification is done partially based on location (for events in a waste management plant, in or on the coast of the Ijsselmeer and in smaller inland lakes) or based on behaviour proportions (for events in agricultural fields or canals).
-The lakes polygons are obtains from the HydroLakes database, the waste management plants polygons are created in the following code, and the LDA model based on behaviour to differenciate foraging on agricultural fields from canals is trained on a trial dataset annotated by hand (see "Behaviour_analysis" code file).
+As explained in the thesis, the classification is done partially based on location (for events in a waste management plant, in the Ijsselmeer or on its coast, and in smaller inland lakes) or based on behaviour proportions (for inland events, in agricultural fields or canals).
+The lakes polygons are obtained from the HydroLakes database, the waste management plants polygons are created in the following code, and the LDA model based on behaviour to differenciate agricultural fields and canals is trained on a trial dataset annotated by hand (see "Behaviour_analysis" code file).
 The input of the classifying function should be a table containing information on location as well as behaviour proportions.
 
-```{r classification}
-# Load required datasets, model and function
-
-# Set the GitHub repository and folder path
+```{r classification, message=FALSE, warning=FALSE, ,results="hide",quiet=TRUE}
+  
+load_classification_objects <- function(){ #Load required datasets, model and function
+  
+  # Set the GitHub repository and folder path
   folder_path = "Models"
   repo_url <- "https://github.com/EManzo13/Caspian-gull-NL"
 
@@ -592,27 +597,21 @@ The input of the classifying function should be a table containing information o
   data_dir <- file.path(temp_import_dir, folder_path)
   files_list <- dir_ls(path = data_dir)
   
-  # Import and merge
+  # Import and check validity
   LDA_model <<- readRDS(files_list[1])
-  ijsselmeer_coast <<- readRDS(files_list[4])
-  lakesNL <<- readRDS(files_list[5])
+  
   lakes_buffer <<- readRDS(files_list[6])
-
-
-load_classification_objects <- function(){
-  setwd("/Users/emiliemanzo/Desktop/Internship/Models")
-  lakes_buffer <<- readRDS("lakes_buffer.rds")
   lakes_buffer <<- st_make_valid(lakes_buffer)
-  NL_lakes <<- readRDS("lakesNL.rds")
-  ijsselmeer <<- NL_lakes %>%
-    filter(Lake_name == 'Ijsselmeer')
-  st_crs(ijsselmeer) <<- st_crs(lakes_buffer)
-  ijsselmeer <<- st_make_valid(ijsselmeer)
-  ijsselmeer_coast <<- readRDS("ijsselmeer_coast.rds")
-  st_crs(ijsselmeer_coast) <<- st_crs(lakes_buffer)
+  
+  ijsselmeer_coast <<- readRDS(files_list[4])
+  st_crs(ijsselmeer_coast) <- st_crs(lakes_buffer)
   ijsselmeer_coast <<- st_make_valid(ijsselmeer_coast)
   
-  # Define areas that need different buffer size (Agri close to water)
+  ijsselmeer <<- readRDS(files_list[5])
+  st_crs(ijsselmeer) <- st_crs(lakes_buffer)
+  ijsselmeer <<- st_make_valid(ijsselmeer)
+  
+  # Define areas that need different buffer size (Agriculture fields close to the coast)
   coastal_agri_areas <<- st_sfc(
     st_polygon(list(rbind(c(5.09133928, 52.77384980), c(5.11180990, 52.77457775), c(5.12191121, 52.84782449), c(5.06827085, 52.90514619), c(5.05781206, 52.90153375), c(5.09787862, 52.84613331), c(5.09133928, 52.77384980)))),
     st_polygon(list(rbind(c(5.17694879, 52.74266369), c(5.18896509, 52.75768205), c(5.22312570, 52.75669917), c(5.23209434, 52.75632622), c(5.22883277, 52.74832997), c(5.19748697, 52.74971954), c(5.18452654, 52.74015506), c(5.17694879, 52.74266369)))),
@@ -622,10 +621,10 @@ load_classification_objects <- function(){
     st_polygon(list(rbind(c(5.59022867, 52.67668654), c(5.59812509, 52.67700284), c(5.60567040, 52.76554717), c(5.66764015, 52.82837470), c(5.69836754, 52.83120742), c(5.69685685, 52.83611943), c(5.66235291, 52.83166010), c(5.58786474, 52.76480491), c(5.59022867, 52.67668654)))),
     st_polygon(list(rbind(c(5.65385167, 52.85397276), c(5.65771808, 52.85563124), c(5.64355199, 52.86257547), c(5.61608617, 52.85304793), c(5.58064410, 52.84939558), c(5.56558242, 52.83579410), c(5.54017654, 52.83652810), c(5.45551341, 52.85615149), c(5.41551182, 52.85117771), c(5.37036488, 52.87398593), c(5.36624500, 52.87254346), c(5.41534016, 52.84869780), c(5.45534175, 52.85242794), c(5.54154983, 52.82855064), c(5.56850067, 52.83331331), c(5.58545062, 52.84764128), c(5.61763112, 52.84879767), c(5.64320867, 52.85905977), c(5.65385167, 52.85397276))))
   )
-  st_crs(coastal_agri_areas) <<- st_crs(lakes_buffer)
+  st_crs(coastal_agri_areas) <- st_crs(lakes_buffer)
   coastal_agri_areas <<- st_make_valid(coastal_agri_areas)
   
-  # Define garbage places
+  # Define waste management plants locations
   garbage <<- st_sfc(
     st_polygon(list(rbind(c(5.06082061, 52.77239580), c(5.07343773, 52.77252764), c(5.07210735, 52.76863505), c(5.06760124, 52.76692131), c(5.06060604, 52.76850523), c(5.06082061, 52.77239580)))),
     st_polygon(list(rbind(c(5.24583702, 52.41666079), c(5.25343304, 52.41975134), c(5.25660877, 52.41776421), c(5.24832611, 52.41443998), c(5.24583702, 52.41666079)))),
@@ -638,9 +637,9 @@ load_classification_objects <- function(){
   st_crs(garbage) <<- st_crs(lakes_buffer)
   garbage <<- st_make_valid(garbage)
   
-  LDA_model <<- readRDS("LDA_model.rds")
+  # Create a logration transformation function, used on the dataset before applying the LDA model
   logratio_transfo <<- function(data, id_col_name){
-    data <- data %>% relocate(id_col_name, everything())
+    data <- data %>% relocate(all_of(id_col_name), everything())
     # Replace the zeros
     transformed_data <- data %>%
       mutate(across(-id_col_name, ~ ifelse(. == 0, 0.001, .))) # Replace zeros with 0.001
@@ -685,9 +684,12 @@ classify_events <- function(data) {
   # Predict event type for inland locations using LDA
   data_sf <- as.data.frame(data_sf)
   inland_data <- data_sf %>% filter(location_type == "Inland")
-  LDA_dataset <- inland_data %>% dplyr::select(event_id,SitStand,TerLoco,Float,Pecking,Flap,Soar,ExFlap,Manouvre)
+  LDA_dataset <- data_sf %>% dplyr::select(event_id,SitStand,TerLoco,Float,Pecking,Flap,Soar,ExFlap,Manouvre)
   LDA_dataset <- logratio_transfo(LDA_dataset, "event_id")
-  LDA_dataset <- LDA_dataset %>% dplyr::select(-event_id)
+  LDA_dataset$location_type <- data_sf$location_type
+  LDA_dataset <- LDA_dataset[which(LDA_dataset$location_type == "Inland"),] #sort out events NOT inland
+  
+  LDA_dataset <- LDA_dataset %>% dplyr::select(-event_id,-location_type) #keep only behaviour proportions
   inland_class <- predict(LDA_model, LDA_dataset)$class
   inland_data$inland_class <- inland_class
   inland_data <- inland_data %>% dplyr::select(event_id, inland_class)
@@ -701,11 +703,17 @@ classify_events <- function(data) {
 }
 
 event_types <- classify_events(Trial_summary)
-Trial_summary <- left_join(Trial_summary, event_types, by = "event_id") # adds event_types column
-
-# Final result table: event ID, individual, date, time, duration and event type
-feeding_events <- All_events_summary %>% dplyr::select(event_id,device_info_serial,start_time,end_time,event_type) 
-feeding_events$date <- as.Date(feeding_events$start_time, tz = "CET")
-feeding_events$month <- month(feeding_events$date)
-feeding_events$duration <- as.numeric(feeding_events$end_time - feeding_events$start_time, units="mins")
+Trial_summary <- left_join(Trial_summary, event_types, by = "event_id") #adds event_types column
 ```
+
+```{r print classification results,warning=FALSE, message=FALSE,echo=T}
+# Final result table: event ID, individual, date, time, duration and event type
+feeding_events <- Trial_summary %>% dplyr::select(event_id,device_info_serial,start_time,end_time,event_type)
+feeding_events$duration.in.min <- (as.numeric(as.POSIXct(feeding_events$end_time, tz = "CET")) - as.numeric(as.POSIXct(feeding_events$start_time, tz = "CET")))/60
+print(feeding_events)
+```
+
+# Bibliography
+McClintock B and Michelot T (2022). ''momentuHMM: Maximum Likelihood Analysis of Animal Movement Behavior Using Multivariate Hidden Markov Models''. https://cran.r-project.org/web/packages/momentuHMM/index.html .    
+
+McClintock B and Michelot T (2018). ''momentuHMM: R package for generalized hidden Markov models of animal movement'', Methods in Ecology and Evolution, 9(6), pp. 1518–1530. doi:10.1111/2041-210X.12995.
