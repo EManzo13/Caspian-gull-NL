@@ -173,7 +173,7 @@ gullsubs_5min <- rm_outliers(gullsubs_5min)
 ## B) Apply hidden Markov model (HMM)
 Based on the method developed by McClintock & Michelot (2018), we used a hidden Markov model (HMM) to detect area-restricted search (ARS) moments from stationary moments and transit & exploratory flights. We used the mumentuHMM package (McClintock & Michelot, 2022) developed by the authors for this purpose.
 It uses the step length and turning angle parameters, therefore using latitude and longitude collected by the device.
-Theses parameters are fixed for each of the 4 states we wish to differentiate (Area-restricted search, Stationary, Exploratory flight and Transit flight) and selected to be the best fitting parameters, determined with randomly generated parameters and maximum likelihood on a subset of the data (see "HMM" code file, which details this process).
+Theses parameters are fixed for each of the 4 states we wish to differentiate (Area-restricted search, Stationary, Exploratory flight and Transit flight) and selected to be the best fitting parameters, determined with randomly generated parameters and maximum likelihood on a subset of the data (see "Models building" code file, which details this process).
 Then, the Viterbi algorithm is used to extract the state of each data point determined by the model.
 
 ```{r HMM, message=FALSE, warning=FALSE}
@@ -578,7 +578,7 @@ print(Trial_summary)
 
 ## C) Classification
 As explained in the thesis, the classification is done partially based on location (for events in a waste management plant, in the Ijsselmeer or on its coast, and in smaller inland lakes) or based on behaviour proportions (for inland events, in agricultural fields or canals).
-The lakes polygons are obtained from the HydroLakes database, the waste management plants polygons are created in the following code, and the LDA model based on behaviour to differenciate agricultural fields and canals is trained on a trial dataset annotated by hand (see "Behaviour_analysis" code file).
+The lakes polygons are obtained from the HydroLakes database, the waste management plants polygons are created in the following code, and the LDA model based on behaviour to differenciate agricultural fields and canals is trained on a trial dataset annotated by hand (see "Models building" code file).
 The input of the classifying function should be a table containing information on location as well as behaviour proportions.
 
 ```{r classification, message=FALSE, warning=FALSE, ,results="hide",quiet=TRUE}

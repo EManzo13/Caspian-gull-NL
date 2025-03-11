@@ -1,0 +1,479 @@
+---
+title: "Models building"
+author: "Emilie Manzo"
+date: "2024-09-10"
+output: html_document
+---
+
+```{r load packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(zCompositions)
+library(multcompView)
+library(compositions)
+library(grid)
+library(easyCODA)
+library(factoextra)
+library(ggrepel)
+library(ggforce)
+```
+# HMM model builing
+The parameters for the models were fixed using a trial dataset of around a month of data, a few days of each bird.  
+This data must first be formated for the function's expectations, i.e. a fixed resolution. Thus, we seperate the trial dataset in 2 subsets, one with higher resolution (1 minute) and one with a lower one (5 minutes).
+
+```{r Format trial data HMM,warning=FALSE,message=FALSE}
+# Format date and time
+data$counttime <- as.numeric(as.POSIXct(data$date_time)) # unit is seconds
+data$date_time <- as.POSIXct(data$date_time)
+data$date <- as.Date(data$date_time)
+
+# Convert longitude latitude to UTM
+data <- data %>%
+  mutate(v = list(vect(., c("longitude", "latitude"), crs = "+proj=longlat")),
+         u = list(project(v[[1]], "+proj=utm +zone=31")),
+         x = crds(u[[1]])[, 1],
+         y = crds(u[[1]])[, 2]) %>%
+  dplyr::select(-v, -u) %>%
+  dplyr::select(1:4, x, y, everything())
+
+# Label colony observations
+data <- data %>%
+  mutate(colony = ifelse(x >= 647500 & x <= 653000 & y >= 5850000 & y <= 5854500, "Yes", "No")) %>%
+  dplyr::select(1:6, colony, everything())
+data$colony = as.factor(data$colony)
+
+## Select smaller dataset: every 60 seconds minimum and without colonies ####
+interval <- 60 # in seconds
+data <- data %>%
+  mutate(time_diff = counttime - lag(counttime, default = first(counttime))) %>%
+  mutate(cumu_sum = cumsum(time_diff))
+gullout <- data %>%
+  filter(cumu_sum %/% interval != lag(cumu_sum %/% interval, default = -1)) %>%
+  filter(colony == "No") %>% mutate(device = "6400") %>% dplyr::select(-time_diff, -cumu_sum,-colony)
+gullout <- gullout %>%
+  mutate(time_diff = counttime - lag(counttime, default = first(counttime))) %>%
+  relocate(1:2, time_diff, everything()) # recalculate new time diff with selected observations
+gullout <- gullout %>%
+  mutate(dist_diff = c(0, distGeo(matrix(c(longitude[-n()], latitude[-n()]), ncol = 2), 
+                                  matrix(c(longitude[-1], latitude[-1]), ncol = 2)))) %>%
+  relocate(1:3, dist_diff, everything()) # calculate distance difference
+
+## Sequence events according to resolution, time diff and dist diff
+gullout$ID[c(1,2)] = 1
+for (i in 3:nrow(gullout)) {
+  if (gullout$time_diff[i] < gullout$time_diff[i-1] & gullout$time_diff[i] > (gullout$time_diff[i-1]-120) 
+      | gullout$time_diff[i] > gullout$time_diff[i-1] & gullout$time_diff[i] < (gullout$time_diff[i-1]+120)) {
+    gullout$ID[i] <- gullout$ID[i-1]}
+  else if (gullout$time_diff[i-1] > 2000 | gullout$time_diff[i-1] < 0){gullout$ID[i] <- gullout$ID[i-1]}
+  else if (gullout$time_diff[i] > 400 & gullout$time_diff[i] > (gullout$time_diff[i-1]+120) 
+           & gullout$dist_diff[i] < 5000 & gullout$time_diff[i] < 2000) {
+    gullout$ID[i] <- gullout$ID[i-1]}
+  else if (gullout$time_diff[i-1] > 400 & gullout$time_diff[i-1] < 2000 & gullout$time_diff[i] < (gullout$time_diff[i-1]-120) 
+           & gullout$dist_diff[i] < 5000) {
+    gullout$ID[i] <- gullout$ID[i-1]}
+  else if (gullout$time_diff[i] == gullout$time_diff[i-1]){gullout$ID[i] <- gullout$ID[i-1]}
+  else {gullout$ID[i] <- gullout$ID[i-1] + 1}
+}
+gullout <- gullout %>%
+  relocate(1:3, ID, everything())
+
+# Dividing in 2 datasets
+gullout$ID <- as.factor(gullout$ID)
+
+# Group data by sequence ID and calculate mean time_diff for each sequence, excluding the first row
+ID_mean_timediff <- gullout %>%
+  group_by(ID) %>%
+  filter(row_number() != 1) %>% # Exclude the first row of each sequence
+  summarise(mean_time_diff = mean(time_diff, na.rm = TRUE)) %>%
+  ungroup()
+gullout <- gullout %>%
+  left_join(ID_mean_timediff, by = "ID") 
+gullout <- gullout %>% mutate(resolution = ifelse(mean_time_diff < 80, "High", "Low")) %>%
+  relocate(1:4,mean_time_diff,resolution,everything())
+
+# Filter sequences into two datasets based on mean time difference
+threshold_1min <- 60
+threshold_5min <- 280
+gullsubs_1min <- gullout %>%
+  filter(abs(mean_time_diff - threshold_1min) <= abs(mean_time_diff - threshold_5min)) %>%
+  dplyr::select(-mean_time_diff)
+gullsubs_5min <- gullout %>%
+  filter(abs(mean_time_diff - threshold_5min) < abs(mean_time_diff - threshold_1min)) %>%
+  dplyr::select(-mean_time_diff)
+
+# Remove sequences with less than 3 observations
+gullsubs_1min <- gullsubs_1min %>%
+  group_by(ID) %>%
+  filter(n() >= 3) %>%
+  ungroup()
+gullsubs_5min <- gullsubs_5min %>%
+  group_by(ID) %>%
+  filter(n() >= 3) %>%
+  ungroup()
+```
+
+Once the datasets ready, we create a function to fit 15 models with randomly assigned parameters (following the mean and distribution defined), then compared by maximum likelihood and keep the best model out of the lot.  
+We do this for each dataset, as the parameters vary with a different resolution.
+
+```{r fit models, warning=FALSE, message=FALSE}
+select_hmm_1min <- function(data, same_device = T){
+  if(same_device == F){
+    data <- data %>%
+      mutate(device_real = device_info_serial,
+             device_info_serial = device_info_serial[1])}
+  
+  d.list<- df_to_list(data, ind = "device_info_serial") #must be the same device nb for all data or it creates 1 dataframe per animal
+  list1<- map(d.list, ~prepData(., type = "UTM", coordNames = c("x","y")))
+  #empty list for order selection
+  k.models<- list()
+  #K = 5
+  
+  #now prepare and run model with different initial values.
+  allm<- list()
+  niter<- 15
+  whichzero <- which(list1[[1]]$step == 0)
+  propzero <- length(whichzero)/nrow(list1[[1]])
+  zeromass0 <- c(propzero, propzero, 0, 0)        #for zero distances by state
+  start.time<- Sys.time()
+  
+  ### Fit model 15 times with variety of parameters
+  for (i in 1:niter) {
+    cat("\n \n \n \n", "K=5","\n", "Iteration", i,"\n")
+    
+    # Step length mean, meters expected between fixes (so depends on interval between points)
+    # for ARS, Stationary, Exploratory and Transit, in this order
+    # for 1 minute:
+    stepMean0 <- runif(4,
+                       min = c(15, 0,  200, 500),
+                       max = c(50, 2, 300, 800))
+    
+    # Step length standard deviation
+    stepSD0 <- runif(4,
+                     min = c(10, 0.01, 200, 200),
+                     max = c(50, 0.3, 400, 300))
+    
+    # Turning angle mean
+    angleMean0 <- c(pi, pi, 0, 0)
+    # Turning angle concentration
+    angleCon0 <- runif(4,
+                       min = c(0, 0.01, 0.2, 0.8),
+                       max = c(0.5, 0.3, 0.4, 0.99))
+    
+    # Fit model
+    if(propzero > 0) {  #don't include zero mass if no 0s present
+      stepPar0 <- c(stepMean0, stepSD0, zeromass0)
+    } else {
+      stepPar0 <- c(stepMean0, stepSD0)
+    }
+    anglePar0 <- c(angleMean0, angleCon0)
+    
+    start.time2<- Sys.time()
+    
+    Trial <- fitHMM(data = list1[[1]], nbStates = 4, 
+                    Par0 = list(step = stepPar0, angle = anglePar0),
+                    dist = list(step = "gamma", angle = "wrpcauchy"),
+                    formula = ~ 1, stationary=TRUE, #stationary for a slightly better fit
+                    estAngleMean = list(angle=TRUE),
+                    stateNames = stateNames,
+                    optMethod = "Nelder-Mead") 
+    end.time2 <- Sys.time()
+    elapsed.time<- difftime(end.time2, start.time2, units = "min")
+    cat('time elapsed:\n')
+    print(elapsed.time)
+    if(!inherits(Trial, "try-error")) {
+      allm[[i]]<-Trial 
+      print(Trial) }
+  }
+  
+  ### Select the best model
+  #extract likelihoods of fitted models
+  allnllk_list<-lapply(allm, function(m) m$mod$minimum)
+  allnllk_list[unlist(lapply(allnllk_list, is.null))]<-NA
+  allnllk <- unlist(allnllk_list)
+  #index of best fitting model (smallest negative log-likelihood)
+  whichbest <- which.min(allnllk)
+  # Best fitting model
+  best_model1 <<- allm[[whichbest]]
+  
+  end.time<- Sys.time()
+  elapsed.time<- difftime(end.time, start.time, units = "min")
+  
+  if(same_device == F){
+    data$device_info_serial <- data$device_real
+    data <- data %>% dplyr::select(-device_real)}
+  
+  ### Print, plot and save best model
+  cat('\n=======================================================================\nBest model: \n')
+  print(best_model1) #gives the best parameters for mean and sd of step and flight
+  cat('\n \ntotal time:',elapsed.time,'\n')
+  plot(best_model1, col = myColors, ask = "N") ## why prints only a piece of the tracks?
+}
+select_hmm_1min(gullsubs_1min, same_device = F)
+plot(best_model1, col = myColors, ask = "N")
+saveRDS(best_model1, "best_model_1min.rds")
+
+select_hmm_5min <- function(data, same_device = T){
+  if(same_device == F){
+    data <- data %>%
+      mutate(device_real = device_info_serial,
+             device_info_serial = device_info_serial[1])}
+  
+  d.list<- df_to_list(data, ind = "device_info_serial") #must be the same device nb for all data or it creates 1 dataframe per animal
+  list1<- map(d.list, ~prepData(., type = "UTM", coordNames = c("x","y")))
+  #empty list for order selection
+  k.models<- list()
+  #K = 5
+  
+  #now prepare and run model with different initial values.
+  allm<- list()
+  niter<- 15
+  whichzero <- which(list1[[1]]$step == 0)
+  propzero <- length(whichzero)/nrow(list1[[1]])
+  zeromass0 <- c(propzero, propzero, 0, 0)        #for zero distances by state
+  start.time<- Sys.time()
+  
+  ### Fit model 15 times with variety of parameters
+  for (i in 1:niter) {
+    cat("\n \n \n \n", "K=5","\n", "Iteration", i,"\n")
+    
+    # Step length mean, meters expected between fixes (so depends on interval between points)
+    # for ARS, Stationary, Exploratory and Transit, in this order
+    # for 1 minute:
+    stepMean0 <- runif(4,
+                       min = c(75, 0,  1000, 1500),
+                       max = c(250, 10, 1500, 4000))
+    
+    # Step length standard deviation
+    stepSD0 <- runif(4,
+                     min = c(50, 0.01, 1000, 1000),
+                     max = c(150, 1.5, 2000, 1500))
+    
+    # Turning angle mean
+    angleMean0 <- c(pi, pi, 0, 0)
+    # Turning angle concentration
+    angleCon0 <- runif(4,
+                       min = c(0, 0.01, 0.2, 0.8),
+                       max = c(0.5, 0.3, 0.5, 0.99))
+    
+    # Fit model
+    if(propzero > 0) {  #don't include zero mass if no 0s present
+      stepPar0 <- c(stepMean0, stepSD0, zeromass0)
+    } else {
+      stepPar0 <- c(stepMean0, stepSD0)
+    }
+    anglePar0 <- c(angleMean0, angleCon0)
+    
+    start.time2<- Sys.time()
+    
+    Trial <- fitHMM(data = list1[[1]], nbStates = 4, 
+                    Par0 = list(step = stepPar0, angle = anglePar0),
+                    dist = list(step = "gamma", angle = "wrpcauchy"),
+                    formula = ~ 1, stationary=TRUE, #stationary for a slightly better fit
+                    estAngleMean = list(angle=TRUE),
+                    stateNames = stateNames,
+                    optMethod = "Nelder-Mead") 
+    end.time2 <- Sys.time()
+    elapsed.time<- difftime(end.time2, start.time2, units = "min")
+    cat('time elapsed:\n')
+    print(elapsed.time)
+    if(!inherits(Trial, "try-error")) {
+      allm[[i]]<-Trial 
+      print(Trial) }
+  }
+  
+  ### Select the best model
+  #extract likelihoods of fitted models
+  allnllk_list<-lapply(allm, function(m) m$mod$minimum)
+  allnllk_list[unlist(lapply(allnllk_list, is.null))]<-NA
+  allnllk <- unlist(allnllk_list)
+  #index of best fitting model (smallest negative log-likelihood)
+  whichbest <- which.min(allnllk)
+  # Best fitting model
+  best_model5 <<- allm[[whichbest]]
+  
+  end.time<- Sys.time()
+  elapsed.time<- difftime(end.time, start.time, units = "min")
+  
+  if(same_device == F){
+    data$device_info_serial <- data$device_real
+    data <- data %>% dplyr::select(-device_real)}
+  
+  ### Print, plot and save best model
+  cat('\n=======================================================================\nBest model: \n')
+  print(best_model5) #gives the best parameters for mean and sd of step and flight
+  cat('\n \ntotal time:',elapsed.time,'\n')
+  plot(best_model5, col = myColors, ask = "N") ## why prints only a piece of the tracks?
+}
+select_hmm_5min(gullsubs_5min, same_device = F)
+plot(best_model5, col = myColors, ask = "N")
+saveRDS(best_model5, "best_model_5min.rds")
+```
+
+
+# LDA model on behaviour
+This model was built on a trial dataset of feeding events classified by hand, composed of feeding event as lines and behaviour proportion as well as the event type and its location as columns.
+
+# Build LDA model
+The LDA model is made to differenciate the events on agricultural lands and those in the canals, based on behaviour proportions. These proportions must be transformed first, using the centered log-ratio method.
+
+```{r LDA model}
+
+# Data transformation
+logratio_transfo <<- function(data, id_column_name){
+    data <- data %>% relocate(id_column_name, everything())
+    # Replace the zeros
+    transformed_data <- data %>%
+      mutate(across(-id_column_name, ~ ifelse(. == 0, 0.001, .))) # Replace zeros with 0.001
+    dl <- rep(0.001, ncol(transformed_data) - 1)
+    
+    # Apply multiplicative lognormal replacement for zeros
+    transformed_data[,2:ncol(transformed_data)] <- zCompositions::multLN(as.matrix(transformed_data[, 2:ncol(transformed_data)]), label = 0.001, dl = dl, z.warning = 1)
+    
+    #Apply centered log ratio transfo
+    transformed_data[,2:ncol(transformed_data)] <- as.data.frame(compositions::clr(transformed_data[, 2:ncol(transformed_data)]))
+    
+    return(transformed_data)
+}
+
+transformed_data <- logratio_transfo(trial_data, "event_id")
+
+# Creating LDA function
+LDAfun <- function(dataset, category_column){
+  # Create the training and testing datasets, respectively with 80 and 20% of the data
+  training.events <- createDataPartition(dataset[[category_column]], p = 0.8, list = FALSE) 
+  train.data <- dataset[training.events, ] 
+  test.data <- dataset[-training.events, ] 
+  
+  # Create and save model
+  preproc.parameter <- preProcess(train.data[, -which(names(train.data) == category_column)], method = c("center", "scale")) 
+  train.transform <- predict(preproc.parameter, train.data[, -which(names(train.data) == category_column)]) 
+  test.transform <- predict(preproc.parameter, test.data[, -which(names(test.data) == category_column)]) 
+  
+  train.transform[[category_column]] <- train.data[[category_column]]
+  test.transform[[category_column]] <- test.data[[category_column]]
+  
+  LDA_model <<- lda(as.formula(paste(category_column, "~ .")), data = train.transform) 
+  
+  # Apply model to same dataset and check accuracy
+  predictions <- predict(LDA_model, test.transform) 
+  accuracy <- mean(predictions$class == test.transform[[category_column]]) 
+  print(paste("Model accuracy:", accuracy))
+}
+
+LDA_dataset <- transformed_data %>% filter(event_type_hand == "Canal" | event_type_hand == "Agri") #only keep inland events from the dataset annotated by hand
+LDA_dataset$event_type_hand <- as.character(LDA_dataset$event_type_hand)
+LDA_dataset$event_type_hand <- as.factor(LDA_dataset$event_type_hand)
+LDA_dataset <- LDA_dataset[,-1] #removes ID column (should only keep the behaviour columns and the class of the events)
+LDAfun(LDA_dataset,"event_type") 
+saveRDS(LDA_model, "LDA_model.rds") #Saves the model
+```
+
+## ANOVA and post-hoc tests
+Performs an ANOVA and post-hoc Tukey's HSD test for each behaviour column of the transformed data from the trial dataset, allowing for comparison of the proportions of behaviour between the different type of events.
+
+```{r tests on behaviour}
+results <- list()
+tukey_results <- list()
+groupings <- list()
+
+# Perform tests
+for (behaviour in colnames(transformed_data)[1:(ncol(transformed_data)-2)]) {
+  # Perform ANOVA and post-hoc tests
+  formula <- as.formula(paste(behaviour, "~ event_type"))
+  aov_result <- aov(formula, data = transformed_data)
+  results[[behaviour]] <- aov_result
+  tukey_results[[behaviour]] <- TukeyHSD(aov_result)
+  
+  # Display diagnostic plots
+  par(mfrow = c(3, 2))
+  plot(aov_result, main = paste("Diagnostic Plots for", behaviour))
+  residuals <- residuals(aov_result)
+  hist(residuals, main = paste("Histogram of Residuals for", behaviour), xlab = "Residuals", col = "lightblue", border = "white")
+  
+  # Generate group letters for the Tukey HSD test results
+  tukey_groups <- multcompLetters(tukey_results[[behaviour]]$event_type[, 4])
+  letters_df <- data.frame(multcompLetters(tukey_results[[behaviour]]$event_type[, 4])$Letters)
+  colnames(letters_df)[1] <- "Letter"
+  letters_df$event_type <- rownames(letters_df)
+  groupings[[behaviour]] <- letters_df
+  
+  # Pause to review plots before moving to the next behaviour
+  readline(prompt = "Press [enter] to continue to the next behaviour")
+}
+
+# Print ANOVA and Tukey's HSD test results
+for (behaviour in names(results)) {
+  cat("\n\n-------------------------------------------------------\nANOVA result for", behaviour, ":\n")
+  print(summary(results[[behaviour]]))
+  cat("\nTukey HSD test result for", behaviour, ":\n")
+  print(tukey_results[[behaviour]])
+  cat("\nGroup letters for", behaviour, ":\n")
+  print(groupings[[behaviour]])
+}
+```
+
+## Plots
+Plots the proportions of behaviour according to event type, in a stacked plot per event type first for overall visualisation and then faceted according to behaviours to represent results of the post-hoc tests, when applied.
+
+```{r Plots}
+## Stacked plot
+myColors <- c("Float" = "#80B1D3", "Soar" = "#8DD3C7", "ExFlap" = "#BEBADA", "Boat" = "#FFFFB3", "Pecking" = "#FB8072", "Flap" = "#CC99FF", "TerLoco" = "#FDB462", "SitStand" = "#B3DE69", "Manouvre" = "#FCCDE5", "Unknown"="#D3D3D3")
+
+ggplot(trial_data, aes(x = event_type, y = proportion)) +
+  geom_bar(aes(fill = prediction), stat = "identity",  width = 0.8) +
+  scale_fill_manual(values = myColors) + labs(fill = "Behaviour")+
+  ggtitle("Proportion of predicted behaviours per type of event") +
+  ylab("Proportion") +
+  xlab("Type of Event") +
+  scale_x_discrete(limits = c("Canal", "Fishing", "Lake", "Fykes", "Agri", "Garbage"),
+                   labels = c("Agri" = "Agricultural\nlands", "Fishing" = "IJsselmeer", "Lake" = "Smaller\nlakes","Canal" = 'Canals')) +
+  theme(legend.position = "right") + theme_classic()
+
+
+## Faceted plot
+summary_data <- trial_data %>%
+  group_by(event_type) %>%
+  summarise(across(starts_with(c("Pecking", "SitStand", "TerLoco", "Soar", "Flap", "Manouvre", "ExFlap", "Float")),
+                   list(mean = ~mean(.), se = ~sd(.)/sqrt(n())), .names = "{col}_{fn}"))
+
+# Convert to long format for ggplot
+summary_long <- summary_data %>%
+  pivot_longer(cols = -event_type, 
+               names_to = c("Behaviour", ".value"), 
+               names_pattern = "(.*)_(mean|se)")
+summary_long <- summary_long %>%
+  arrange(Behaviour, event_type) %>% relocate(Behaviour, event_type, everything())
+
+# Extract and format significance letters for all behaviors
+letters_data <- bind_rows(lapply(names(groupings), function(behaviour) {
+  letters_df <- groupings[[behaviour]]
+  letters_df <- letters_df %>%
+    mutate(Behaviour = behaviour)
+  return(letters_df)
+}))
+
+summary_long <- summary_long %>%
+  left_join(letters_data, by = c("event_type" = "event_type", "Behaviour" = "Behaviour"))
+
+# Add y_position for letters
+summary_long <- summary_long %>%
+  mutate(y_position = mean + se + ifelse(mean > 5, 0.2,0.05))
+
+# Plot the data
+dev.off()
+ggplot(summary_long, aes(x = event_type, y = mean, fill = event_type)) +
+  geom_bar(stat = "identity", position = "dodge", col = 'black') +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), 
+                width = 0.2, position = position_dodge(0.9)) +
+  geom_text(aes(y = y_position, label = Letter), vjust = -0.5, size = 3) +
+  facet_wrap(~ Behaviour, scales = "free_y", nrow = 2, ncol = 4) +
+  labs(x = "Event Type", y = "Mean Proportion (%)", fill = 'Event type') +
+  theme_minimal() +
+  scale_fill_brewer(palette = 'Set3',
+                    limits = c("Canal", "IJsselmeer", "Lake", "Coast", "Agri", "Garbage"),
+                    labels = c("Agri" = "Agricultural\nlands", "Lake" = "Smaller\nlakes","Canal" = 'Canals')) +
+  scale_x_discrete(limits = c("Canal", "IJsselmeer", "Lake", "Coast", "Agri", "Garbage")) +
+  theme(strip.text = element_text(face = "bold", size = 10),  # Adjust strip text size
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.key.spacing.y = unit(5, "pt"))
+```
