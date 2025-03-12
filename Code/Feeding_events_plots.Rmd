@@ -17,7 +17,8 @@ library(grid)
 ```
 
 # Plot for singular events: trajectory, speed, temperature and altitude
-Plotting function allowing for visualisation of the animal's route and behaviour while foraging (used during data observation). To be applied to a dataset of all GPS points within a feeding event, for which the temperature and the altitude are measured as well. An API google key must be obtained to have a background map in the track plot.
+Plotting function allowing for visualisation of the animal's route and behaviour while foraging (used during data observation).   
+To be applied to a dataset of all GPS points within a feeding event, for which the temperature and the altitude are measured as well. An API google key must be obtained to have a background map in the track plot.
 
 ```{r Single plots, message=FALSE, warning=FALSE}
 #Save google maps API key to obtain map background
@@ -47,7 +48,7 @@ plot_map <- function(data, zoom = 13, points = 2){
   myColors <- c("Float" = "#80B1D3", "Flap" = "#8DD3C7", "Soar" = "#BEBADA", "Boat" = "#FFFFB3", "Pecking" = "#FB8072", "ExFlap" = "purple", "Manouvre" = "#FDB462", "SitStand" = "#B3DE69", "TerLoco" = "#FCCDE5", "Unknown"="#D3D3D3")
   custom_colors <- scale_colour_manual(name = "prediction", values = myColors)
   
-  #Format data
+  # Format data
   data$counttime <- as.numeric(as.POSIXct(data$time)) # unit is seconds
   data$date <- as.Date(data$time)
   data$time <- format(as.POSIXct(data$time), format = "%H:%M:%S")
@@ -55,7 +56,7 @@ plot_map <- function(data, zoom = 13, points = 2){
   data$speed <- c((data$distance / diff(data$counttime)) * 3.6) # km/h
   data$tempchange <- c(0, diff(data$temperature) / diff(data$counttime))
   
-  #Prepare for plot limits and title
+  # Prepare for plot limits and title
   custom_breaks <- data$counttime[seq(1, length(data$counttime), by = 10)]
   custom_labels <- data$time[seq(1, length(data$time), by = 10)]
   device_id <- data$device[1]
@@ -64,7 +65,7 @@ plot_map <- function(data, zoom = 13, points = 2){
   end_time <- as.character(data$time[nrow(data)])
   end_date <- as.character(data$date[nrow(data)])
   
-  #Route plot
+  # Route plot
   map <- get_googlemap(center = c(lon = median(data$longitude), lat = median(data$latitude)), zoom = zoom, maptype = "satellite") #adjust zoom according to écartement des points
   Route <- ggmap(map) + 
     geom_segment(data = data, aes(x = longitude, y = latitude, col = prediction, xend = lead(longitude), yend = lead(latitude)),
@@ -76,10 +77,10 @@ plot_map <- function(data, zoom = 13, points = 2){
           legend.key.width = unit(0.5, "lines"), plot.margin = margin(30, 10, 30, 30)) +
     labs(title = "Route", x = "Longitude", y = "Latitude",
          subtitle = paste("Device ", device_id,", from ", start_date, " ",start_time, " until ", end_date, " ", end_time,'\n', sep="")) +
-    guides(col = guide_legend(override.aes = list(size = 2)))  # Adjust the size of the dots in the legend
+    guides(col = guide_legend(override.aes = list(size = 2)))
 
-# Group and arrange smaller plots
-Altitude <- ggplot(data, aes(x = counttime, y = altitude, col = prediction)) + 
+  # Group and arrange smaller plots
+  Altitude <- ggplot(data, aes(x = counttime, y = altitude, col = prediction)) + 
     geom_point(size = points, show.legend = F) + 
     scale_color_manual(name = "Behaviour", values = myColors) + 
     scale_x_continuous(breaks = custom_breaks, labels = custom_labels) + 
@@ -116,8 +117,8 @@ Altitude <- ggplot(data, aes(x = counttime, y = altitude, col = prediction)) +
     labs(x = "Time", y = "Temperature change per time interval (°C)")
 
   small_plots <- list(Altitude, Temperature, Speed, TempChange)
-  figure <- arrangeGrob(grobs = small_plots, ncol = 2, nrow=2, padding = unit(10, "pt")) # Use arrangeGrob instead of grid.arrange
-  GG <- arrangeGrob(Route, figure, ncol = 2, padding = unit(10, "pt")) # Use arrangeGrob instead of grid.arrange
+  figure <- arrangeGrob(grobs = small_plots, ncol = 2, nrow=2, padding = unit(10, "pt"))
+  GG <- arrangeGrob(Route, figure, ncol = 2, padding = unit(10, "pt"))
   grid.newpage()
   grid.draw(GG)
 }
