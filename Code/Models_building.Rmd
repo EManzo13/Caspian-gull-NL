@@ -205,7 +205,7 @@ select_hmm_1min <- function(data, same_device = T){
   cat('\n=======================================================================\nBest model: \n')
   print(best_model1) #gives the best parameters for mean and sd of step and flight
   cat('\n \ntotal time:',elapsed.time,'\n')
-  plot(best_model1, col = myColors, ask = "N") ## why prints only a piece of the tracks?
+  plot(best_model1, col = myColors, ask = "N")
 }
 select_hmm_1min(gullsubs_1min, same_device = F)
 plot(best_model1, col = myColors, ask = "N")
@@ -301,7 +301,7 @@ select_hmm_5min <- function(data, same_device = T){
   cat('\n=======================================================================\nBest model: \n')
   print(best_model5) #gives the best parameters for mean and sd of step and flight
   cat('\n \ntotal time:',elapsed.time,'\n')
-  plot(best_model5, col = myColors, ask = "N") ## why prints only a piece of the tracks?
+  plot(best_model5, col = myColors, ask = "N")
 }
 select_hmm_5min(gullsubs_5min, same_device = F)
 plot(best_model5, col = myColors, ask = "N")
@@ -309,10 +309,10 @@ saveRDS(best_model5, "best_model_5min.rds")
 ```
 
 
-# LDA model on behaviour
-This model was built on a trial dataset of feeding events classified by hand, composed of feeding event as lines and behaviour proportion as well as the event type and its location as columns.
+# Behaviour analysis
+This analysis was conducted on a trial dataset of feeding events classified by hand, composed of feeding event as lines and behaviour proportions as well as the event type and its location as columns.
 
-# Build LDA model
+## Build LDA model
 The LDA model is made to differenciate the events on agricultural lands and those in the canals, based on behaviour proportions. These proportions must be transformed first, using the centered log-ratio method.
 
 ```{r LDA model}
